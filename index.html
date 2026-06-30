@@ -86,6 +86,24 @@
     border-radius:8px; padding:12px 14px;
   }
 
+  .steps{
+    margin:4px 0 0; padding-left:0; list-style:none; counter-reset:step;
+    display:flex; flex-direction:column; gap:8px;
+  }
+  .steps li{
+    counter-increment:step;
+    font-size:13.5px; line-height:1.5; color:var(--text);
+    background:var(--panel-2); border:1px solid var(--line);
+    border-left:2.5px solid var(--accent);
+    border-radius:6px; padding:10px 14px 10px 40px; position:relative;
+  }
+  .steps li::before{
+    content:counter(step);
+    position:absolute; left:14px; top:10px;
+    font-family:var(--mono); font-size:11.5px; color:var(--accent);
+    font-weight:600;
+  }
+
   .modlist{
     display:flex; flex-wrap:wrap; gap:6px; margin-top:4px;
   }
@@ -159,6 +177,39 @@ const NTSTATUS = {
   0xC000001D: "STATUS_ILLEGAL_INSTRUCTION",
   0x80000003: "STATUS_BREAKPOINT",
   0xC0000409: "STATUS_STACK_BUFFER_OVERRUN",
+};
+
+// General remediation steps by bug check code. These are starting points,
+// not guaranteed fixes — actual root cause still depends on the culprit driver/hardware.
+const BUGCHECK_STEPS = {
+  0x1:   ["Update or roll back any recently changed/installed driver.", "Run Driver Verifier to catch the offending driver (Settings > Driver Verifier or verifier.exe)."],
+  0xA:   ["Update the driver tied to the flagged module to the latest version from the vendor.", "Run a memory diagnostic (Windows Memory Diagnostic or MemTest86) to rule out failing RAM.", "If overclocked, revert to stock clocks and retest."],
+  0x1A:  ["Run a memory diagnostic (MemTest86 for several passes) to rule out failing RAM.", "Update the driver tied to the flagged module.", "Run `chkdsk /f /r` if a storage driver is implicated."],
+  0x1E:  ["Update the driver/module tied to the flagged exception.", "Check Windows Update for a pending cumulative update — many KMODE_EXCEPTION crashes are fixed in OS patches.", "If this started after installing new software, uninstall it and retest."],
+  0x24:  ["Run `chkdsk /f /r` on the affected drive immediately.", "Check disk health via SMART (CrystalDiskInfo) for reallocated/pending sectors.", "Back up data now — this bug check often precedes drive failure."],
+  0x3B:  ["Update the driver tied to the flagged module.", "Run System File Checker: `sfc /scannow` to rule out corrupted system files.", "Check for a pending Windows Update."],
+  0x50:  ["Run a memory diagnostic (MemTest86) for several passes.", "Run `chkdsk /f /r` and a SMART check on the system drive.", "Update the driver tied to the flagged module."],
+  0x7E:  ["Update the driver tied to the flagged module to the latest vendor release.", "Roll back any driver updated around the time crashes started."],
+  0xD1:  ["Update the driver tied to the flagged module — this code is almost always a driver bug.", "If it's a network or storage driver, check the vendor site for a newer release, not just Windows Update."],
+  0xEF:  ["This is usually a downstream effect — check earlier crash dumps from the same period for a root-cause bug check.", "Run `chkdsk /f /r` and a SMART check, since a stalled critical process is often caused by disk I/O failing to complete.", "Run `sfc /scannow` to check for corrupted system files."],
+  0x133: ["Update the driver tied to the flagged module — this is almost always a driver holding a lock too long.", "If a storage or GPU driver is flagged, check vendor site for a newer release.", "Disable Fast Startup and any third-party disk-caching utilities as a temporary mitigation."],
+  0x9F:  ["Update the driver tied to the flagged module, especially storage/USB/network drivers.", "Disable USB selective suspend and fast startup in Power Options as a temporary workaround.", "Check for a BIOS/firmware update from the manufacturer."],
+  0x144: ["Update the flagged driver/runtime to match what the current Windows build expects.", "Check Windows Update for a pending cumulative update."],
+  0x139: ["Update the driver tied to the flagged module — this is a corruption check, usually a driver bug.", "Run a memory diagnostic to rule out failing RAM.", "Run Driver Verifier to catch the specific offending driver."],
+  0x7A:  ["Run `chkdsk /f /r` on the affected drive immediately.", "Check SMART status (CrystalDiskInfo) for reallocated/pending sectors or a failing health indicator.", "Reseat the SATA/NVMe cable and connector if this is a desktop.", "Back up data now — this strongly indicates failing storage hardware."],
+  0xC2:  ["Update the driver tied to the flagged module — this is almost always a driver bug.", "Run Driver Verifier to pinpoint the exact offending driver."],
+  0xC4:  ["Check Driver Verifier output (Event Viewer) for the specific driver and rule violated.", "Update or remove the flagged driver."],
+  0xC5:  ["Update the driver tied to the flagged module — it corrupted a kernel memory pool.", "Run Driver Verifier with Special Pool enabled to confirm the exact driver."],
+  0x1000007E: ["Update the driver tied to the flagged module to the latest vendor release.", "Check for a pending Windows Update — exception codes like 0xC0000005 are sometimes fixed in OS patches."],
+  0x1000008E: ["Update the driver tied to the flagged module.", "Check for a pending Windows Update."],
+};
+const DEFAULT_STEPS = ["Update all drivers to their latest vendor versions, especially the one flagged below.", "Run `sfc /scannow` to check for corrupted system files.", "Check Windows Update for pending updates."];
+
+// Category-specific steps, layered on top of bug-check steps when a known driver category is detected.
+const CATEGORY_STEPS = {
+  storage: ["Run a SMART health check (CrystalDiskInfo) — look for reallocated, pending, or uncorrectable sector counts.", "Run `chkdsk /f /r` on the affected drive.", "Update the storage controller driver (Intel RST, AMD chipset, or NVMe driver) directly from the vendor site, not just Windows Update.", "If this is a desktop, reseat the SATA/NVMe cable and connector.", "Check the drive's firmware version against the manufacturer's latest release."],
+  graphics: ["Do a clean GPU driver reinstall using DDU (Display Driver Uninstaller) in Safe Mode, then install the latest driver from the vendor.", "Check GPU temperatures under load (HWInfo/GPU-Z) to rule out thermal throttling or failure.", "If overclocked (GPU or via MSI Afterburner/similar), revert to stock and retest.", "Check the power connector seating if this is a discrete GPU."],
+  network: ["Update the network adapter driver directly from the vendor (not just Windows Update).", "Disable any third-party firewall/VPN software temporarily to rule out a conflict.", "Check for a BIOS/chipset update if this is an onboard NIC."]
 };
 
 const STORAGE_DRIVERS = ["storport.sys","storahci.sys","nvme.sys","stornvme.sys","iastorac.sys","iastora.sys","ataport.sys","disk.sys","partmgr.sys","volmgr.sys","scsiport.sys","raidport.sys"];
@@ -273,6 +324,21 @@ function parseMinidump(buf){
   };
 }
 
+function buildSteps(bugCheckCode, classification){
+  const bcSteps = (bugCheckCode !== undefined && BUGCHECK_STEPS[bugCheckCode]) ? BUGCHECK_STEPS[bugCheckCode] : DEFAULT_STEPS;
+  const catSteps = classification && CATEGORY_STEPS[classification.category] ? CATEGORY_STEPS[classification.category] : [];
+  // Category steps are more specific, so lead with those, then add any
+  // bug-check steps not already implied, deduplicated.
+  const combined = [...catSteps, ...bcSteps];
+  const seen = new Set();
+  const deduped = [];
+  for(const s of combined){
+    const key = s.toLowerCase();
+    if(!seen.has(key)){ seen.add(key); deduped.push(s); }
+  }
+  return deduped;
+}
+
 function buildKernelReport(filename, buf, parsed){
   const bc = parsed.bugCheckCode;
   const known = BUGCHECKS[bc];
@@ -282,6 +348,7 @@ function buildKernelReport(filename, buf, parsed){
   const modMap = findSysModules(buf);
   const modules = [...modMap.keys()];
   const classification = classify(modules);
+  const steps = buildSteps(bc, classification);
 
   // If P1 of an exception-style bugcheck looks like an NTSTATUS code, decode it
   let ntstatusNote = null;
@@ -300,14 +367,17 @@ function buildKernelReport(filename, buf, parsed){
     numProcessors: parsed.numProcessors,
     modules,
     modMap,
-    classification
+    classification,
+    steps
   };
 }
 
 function buildMinidumpReport(filename, buf, parsed){
   let bugCheckHex = "n/a", bugCheckName = "Unknown (no bug check stream parsed)", meaning="";
+  let excCode;
   if(parsed.exceptionInfo){
     const code = parsed.exceptionInfo.exceptionCode;
+    excCode = code;
     bugCheckHex = hex(code);
     bugCheckName = NTSTATUS[code] ? NTSTATUS[code].split(" — ")[0] : "Exception code " + hex(code);
     meaning = NTSTATUS[code] ? NTSTATUS[code] : "Raw exception code captured from the minidump exception stream.";
@@ -315,6 +385,7 @@ function buildMinidumpReport(filename, buf, parsed){
   const modMap = findSysModules(buf);
   const modules = [...modMap.keys()];
   const classification = classify(modules);
+  const steps = buildSteps(excCode, classification);
 
   return {
     filename,
@@ -323,7 +394,7 @@ function buildMinidumpReport(filename, buf, parsed){
     ntstatusNote: null,
     params: [],
     format: parsed.format,
-    modules, modMap, classification
+    modules, modMap, classification, steps
   };
 }
 
@@ -337,7 +408,7 @@ function buildUnknownReport(filename){
     ntstatusNote: null,
     params: [],
     format: "Unknown",
-    modules: [], modMap: new Map(), classification: null
+    modules: [], modMap: new Map(), classification: null, steps: []
   };
 }
 
@@ -373,6 +444,13 @@ function renderReport(r, idx){
       </div>`
     : "";
 
+  const stepsHtml = (r.steps && r.steps.length)
+    ? `<div class="section-label">Recommended steps</div>
+       <ol class="steps">
+         ${r.steps.map(s=>`<li>${escapeHtml(s)}</li>`).join("")}
+       </ol>`
+    : "";
+
   return `
   <div class="card" id="card-${idx}">
     <div class="card-head" onclick="document.getElementById('card-${idx}').classList.toggle('open')">
@@ -395,6 +473,7 @@ function renderReport(r, idx){
       <div class="section-label">Driver / module names found in file</div>
       ${modsHtml}
       ${classHtml}
+      ${stepsHtml}
     </div>
   </div>`;
 }
