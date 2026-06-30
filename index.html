@@ -1,0 +1,481 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Crash Dump Analyzer</title>
+<style>
+  :root{
+    --bg:#0b0d10;
+    --panel:#13161b;
+    --panel-2:#191d24;
+    --line:#262b33;
+    --text:#e8eaed;
+    --dim:#8a9099;
+    --accent:#5ad1c4;
+    --warn:#e8b339;
+    --bad:#e2604f;
+    --mono:"IBM Plex Mono","SF Mono",Consolas,monospace;
+    --sans:"Inter","Segoe UI",sans-serif;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:var(--sans); -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:920px;margin:0 auto;padding:40px 24px 80px;}
+  header{margin-bottom:32px;}
+  header h1{
+    font-size:22px; font-weight:600; margin:0 0 6px; letter-spacing:-0.01em;
+  }
+  header p{color:var(--dim); margin:0; font-size:14px;}
+
+  .drop{
+    border:1.5px dashed var(--line); border-radius:10px;
+    padding:36px 24px; text-align:center; cursor:pointer;
+    transition:border-color .15s, background .15s;
+    background:var(--panel);
+  }
+  .drop.drag{border-color:var(--accent); background:var(--panel-2);}
+  .drop .icon{font-size:28px; opacity:.6; margin-bottom:10px;}
+  .drop .main{font-size:14px; color:var(--text);}
+  .drop .sub{font-size:12px; color:var(--dim); margin-top:4px;}
+  input[type=file]{display:none;}
+
+  .reports{margin-top:28px; display:flex; flex-direction:column; gap:14px;}
+
+  .card{
+    background:var(--panel); border:1px solid var(--line); border-radius:10px;
+    overflow:hidden;
+  }
+  .card-head{
+    display:flex; align-items:center; justify-content:space-between;
+    padding:14px 18px; cursor:pointer; gap:12px;
+  }
+  .card-head:hover{background:var(--panel-2);}
+  .card-head-left{display:flex; align-items:center; gap:10px; min-width:0;}
+  .sev-dot{width:9px;height:9px;border-radius:50%; flex:0 0 auto;}
+  .sev-dot.bad{background:var(--bad);}
+  .sev-dot.warn{background:var(--warn);}
+  .fname{
+    font-family:var(--mono); font-size:13px; color:var(--text);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
+  .bugcheck-name{
+    font-size:13px; color:var(--dim); white-space:nowrap;
+    overflow:hidden; text-overflow:ellipsis;
+  }
+  .chev{color:var(--dim); font-size:12px; flex:0 0 auto; transition:transform .15s;}
+  .card.open .chev{transform:rotate(90deg);}
+
+  .card-body{display:none; padding:0 18px 18px; border-top:1px solid var(--line);}
+  .card.open .card-body{display:block;}
+
+  .kv{display:grid; grid-template-columns:160px 1fr; gap:6px 16px; margin:16px 0;}
+  .kv .k{color:var(--dim); font-size:12.5px; padding-top:1px;}
+  .kv .v{font-family:var(--mono); font-size:12.5px; word-break:break-all;}
+  .v.code{color:var(--accent);}
+
+  .section-label{
+    font-size:11px; text-transform:uppercase; letter-spacing:.06em;
+    color:var(--dim); margin:18px 0 8px; font-weight:600;
+  }
+
+  .meaning{
+    font-size:13.5px; line-height:1.55; color:var(--text);
+    background:var(--panel-2); border:1px solid var(--line);
+    border-radius:8px; padding:12px 14px;
+  }
+
+  .modlist{
+    display:flex; flex-wrap:wrap; gap:6px; margin-top:4px;
+  }
+  .mod{
+    font-family:var(--mono); font-size:11.5px; padding:3px 8px;
+    border-radius:5px; background:var(--panel-2); border:1px solid var(--line);
+    color:var(--text);
+  }
+  .mod.suspect{border-color:var(--bad); color:var(--bad);}
+
+  .summary-banner{
+    margin-top:24px; padding:16px 18px; border-radius:10px;
+    background:linear-gradient(135deg, rgba(90,209,196,.08), rgba(90,209,196,.02));
+    border:1px solid rgba(90,209,196,.25);
+    font-size:13.5px; line-height:1.6;
+  }
+  .summary-banner strong{color:var(--accent);}
+
+  .err{color:var(--bad); font-size:13px; padding:10px 0;}
+
+  footer{margin-top:40px; color:var(--dim); font-size:11.5px; text-align:center;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>Crash Dump Analyzer</h1>
+    <p>Drop in .dmp files (kernel or minidump) to get a bug check breakdown and likely culprit driver. Everything runs locally in your browser — files are never uploaded anywhere.</p>
+  </header>
+
+  <div class="drop" id="drop">
+    <div class="icon">⤓</div>
+    <div class="main">Drop .dmp files here, or click to browse</div>
+    <div class="sub">Supports kernel dumps (PAGEDU64 / PAGEDUMP) and minidumps (MDMP)</div>
+    <input type="file" id="fileInput" multiple accept=".dmp">
+  </div>
+
+  <div class="reports" id="reports"></div>
+
+  <footer>Heuristic, offline analysis — bug check codes and module names are read directly from dump headers. Not a substitute for WinDbg with full symbol resolution.</footer>
+</div>
+
+<script>
+const BUGCHECKS = {
+  0x1:  ["APC_INDEX_MISMATCH", "The number of times the kernel disables/enables APCs got out of sync, almost always caused by a buggy driver."],
+  0xA:  ["IRQL_NOT_LESS_OR_EQUAL", "Kernel-mode code touched memory at a higher IRQL (interrupt level) than allowed. Usually a driver bug, sometimes triggered by faulty RAM."],
+  0x1A: ["MEMORY_MANAGEMENT", "A severe memory management error, often from a driver corrupting memory, or from genuinely failing physical RAM."],
+  0x1E: ["KMODE_EXCEPTION_NOT_HANDLED", "A kernel-mode driver or the OS itself hit an exception (e.g. access violation) it didn't catch. Param1 is the NTSTATUS exception code."],
+  0x24: ["NTFS_FILE_SYSTEM", "The NTFS driver hit a fatal error, almost always pointing at disk/filesystem corruption or a failing drive."],
+  0x3B: ["SYSTEM_SERVICE_EXCEPTION", "An exception occurred while executing a system service routine, usually triggered by a buggy or incompatible driver."],
+  0x50: ["PAGE_FAULT_IN_NONPAGED_AREA", "Invalid memory was referenced. Common causes: faulty driver, failing RAM, or a disk that's silently corrupting reads."],
+  0x7E: ["SYSTEM_THREAD_EXCEPTION_NOT_HANDLED", "A system thread generated an exception the error handler didn't catch."],
+  0xD1: ["DRIVER_IRQL_NOT_LESS_OR_EQUAL", "A driver attempted to access memory at the wrong IRQL — almost always a driver bug, very often network or storage drivers."],
+  0xEF: ["CRITICAL_PROCESS_DIED", "A critical Windows process (wininit, csrss, services.exe, etc.) terminated unexpectedly. Frequently a downstream effect of disk I/O stalling or failing."],
+  0x133:["DPC_WATCHDOG_VIOLATION", "A driver held a DPC (or spinlock) for too long, freezing the system until Windows force-crashes it. Often storage or GPU drivers."],
+  0x9F: ["DRIVER_POWER_STATE_FAILURE", "A driver failed to handle a power state transition (sleep/wake) correctly."],
+  0x144:["BAD_FUNCTION_TABLE_TEST", "A function table used for stack unwinding was invalid — usually a driver/runtime mismatch."],
+  0x139:["KERNEL_SECURITY_CHECK_FAILURE", "A kernel data structure was corrupted (stack overrun, etc.), caught by a security check. Can indicate a driver bug or memory corruption."],
+  0x7A: ["KERNEL_DATA_INPAGE_ERROR", "Windows couldn't read a needed page of kernel data from disk — strongly indicates a failing disk, bad sectors, or a flaky storage controller/cable."],
+  0xC2: ["BAD_POOL_CALLER", "A driver made an invalid pool memory request, almost always a driver bug."],
+  0xC4: ["DRIVER_VERIFIER_DETECTED_VIOLATION", "Driver Verifier caught a driver violating kernel rules."],
+  0xC5: ["DRIVER_CORRUPTED_EXPOOL", "A driver corrupted a kernel memory pool."],
+  0x1000007E: ["SYSTEM_THREAD_EXCEPTION_NOT_HANDLED (driver)", "A system thread generated an exception the error handler didn't catch — the 0x10000000 offset means a driver, not the kernel itself, was running at the time."],
+  0x1000008E: ["KERNEL_MODE_EXCEPTION_NOT_HANDLED (driver)", "Driver-attributed kernel exception."],
+};
+
+const NTSTATUS = {
+  0xC0000005: "STATUS_ACCESS_VIOLATION — code tried to read or write memory it didn't have permission for.",
+  0xC0000094: "STATUS_INTEGER_DIVIDE_BY_ZERO",
+  0xC000001D: "STATUS_ILLEGAL_INSTRUCTION",
+  0x80000003: "STATUS_BREAKPOINT",
+  0xC0000409: "STATUS_STACK_BUFFER_OVERRUN",
+};
+
+const STORAGE_DRIVERS = ["storport.sys","storahci.sys","nvme.sys","stornvme.sys","iastorac.sys","iastora.sys","ataport.sys","disk.sys","partmgr.sys","volmgr.sys","scsiport.sys","raidport.sys"];
+const GRAPHICS_DRIVERS = ["nvlddmkm.sys","atikmpag.sys","igdkmd64.sys","amdkmpfd.sys"];
+const NETWORK_DRIVERS = ["ndis.sys","netio.sys","rt640x64.sys","e1d68x64.sys"];
+
+function classify(modules){
+  const lower = modules.map(m=>m.toLowerCase());
+  const hit = (list)=>list.find(d=>lower.includes(d));
+  const storage = hit(STORAGE_DRIVERS);
+  const gfx = hit(GRAPHICS_DRIVERS);
+  const net = hit(NETWORK_DRIVERS);
+  if(storage) return {category:"storage", driver:storage, note:"Storage stack driver — points at disk, controller, or cable issues rather than a random app."};
+  if(gfx) return {category:"graphics", driver:gfx, note:"GPU driver — often a driver version issue, overclock, or thermal/power problem."};
+  if(net) return {category:"network", driver:net, note:"Network driver involved."};
+  return null;
+}
+
+function hex(n){ return "0x" + n.toString(16); }
+
+function readU32(buf, off){ return new DataView(buf).getUint32(off, true); }
+function readU64(buf, off){
+  const dv = new DataView(buf);
+  const lo = dv.getUint32(off, true);
+  const hi = dv.getUint32(off+4, true);
+  return (BigInt(hi) << 32n) | BigInt(lo);
+}
+
+function bytesToAscii(u8){
+  let out = "";
+  for(let i=0;i<u8.length;i++){
+    const c = u8[i];
+    out += (c>=32 && c<127) ? String.fromCharCode(c) : "\u0000";
+  }
+  return out;
+}
+
+function findSysModules(buf){
+  // Scan raw bytes for ASCII strings ending in ".sys" (case-insensitive),
+  // limited length, alnum/._- charset. This works without symbol parsing
+  // because driver filenames are stored as plain strings in module lists.
+  const u8 = new Uint8Array(buf);
+  const ascii = bytesToAscii(u8);
+  const re = /[A-Za-z0-9_\-]{2,40}\.sys/gi;
+  const found = new Map();
+  let m;
+  while((m = re.exec(ascii)) !== null){
+    const name = m[0].toLowerCase();
+    found.set(name, (found.get(name)||0)+1);
+  }
+  return found; // Map name -> occurrence count
+}
+
+function parseKernelDump(buf){
+  const dv = new DataView(buf);
+  const sig = String.fromCharCode(dv.getUint8(0),dv.getUint8(1),dv.getUint8(2),dv.getUint8(3));
+  const valid = String.fromCharCode(dv.getUint8(4),dv.getUint8(5),dv.getUint8(6),dv.getUint8(7));
+  if(sig !== "PAGE") return null;
+
+  const majorVersion = readU32(buf, 0x08);
+  const machineImageType = readU32(buf, 0x30);
+  const numProcessors = readU32(buf, 0x34);
+  const bugCheckCode = readU32(buf, 0x38);
+  const p1 = readU64(buf, 0x40);
+  const p2 = readU64(buf, 0x48);
+  const p3 = readU64(buf, 0x50);
+  const p4 = readU64(buf, 0x58);
+
+  return {
+    format: valid === "DU64" ? "Kernel Memory Dump (64-bit)" : `Kernel Memory Dump (${valid})`,
+    machineImageType, numProcessors, majorVersion,
+    bugCheckCode, p1, p2, p3, p4
+  };
+}
+
+function parseMinidump(buf){
+  const dv = new DataView(buf);
+  const sig = readU32(buf, 0);
+  if(sig !== 0x504d444d) return null; // 'MDMP' little-endian = 0x504D444D
+
+  const numStreams = dv.getUint32(4, true);
+  const streamDirRva = dv.getUint32(8, true);
+
+  // Stream types we care about
+  const MiscInfoStream = 15;
+  const ExceptionStream = 6;
+  const SystemInfoStream = 7;
+
+  let exceptionInfo = null;
+
+  for(let i=0;i<numStreams;i++){
+    const entryOff = streamDirRva + i*12;
+    if(entryOff+12 > buf.byteLength) break;
+    const streamType = dv.getUint32(entryOff, true);
+    const dataSize = dv.getUint32(entryOff+4, true);
+    const rva = dv.getUint32(entryOff+8, true);
+
+    if(streamType === ExceptionStream && rva+96 <= buf.byteLength){
+      // MINIDUMP_EXCEPTION_STREAM: ThreadId(4), align(4), ExceptionRecord starts at +8
+      // ExceptionRecord: ExceptionCode(4) ExceptionFlags(4) ExceptionRecord(8) ExceptionAddress(8) ...
+      const excOff = rva + 8;
+      const exceptionCode = dv.getUint32(excOff, true);
+      const exceptionAddress = readU64(buf, excOff + 16);
+      exceptionInfo = { exceptionCode, exceptionAddress };
+    }
+  }
+
+  return {
+    format: "Minidump (MDMP)",
+    numStreams,
+    exceptionInfo
+  };
+}
+
+function buildKernelReport(filename, buf, parsed){
+  const bc = parsed.bugCheckCode;
+  const known = BUGCHECKS[bc];
+  const name = known ? known[0] : "UNKNOWN_BUG_CHECK";
+  const meaning = known ? known[1] : "This bug check code isn't in the local lookup table — refer to Microsoft's bug check reference for details.";
+
+  const modMap = findSysModules(buf);
+  const modules = [...modMap.keys()];
+  const classification = classify(modules);
+
+  // If P1 of an exception-style bugcheck looks like an NTSTATUS code, decode it
+  let ntstatusNote = null;
+  const p1num = Number(parsed.p1 & 0xffffffffn);
+  if(NTSTATUS[p1num]) ntstatusNote = NTSTATUS[p1num];
+
+  return {
+    filename,
+    severity: "bad",
+    bugCheckHex: hex(bc),
+    bugCheckName: name,
+    meaning,
+    ntstatusNote,
+    params: [parsed.p1, parsed.p2, parsed.p3, parsed.p4],
+    format: parsed.format,
+    numProcessors: parsed.numProcessors,
+    modules,
+    modMap,
+    classification
+  };
+}
+
+function buildMinidumpReport(filename, buf, parsed){
+  let bugCheckHex = "n/a", bugCheckName = "Unknown (no bug check stream parsed)", meaning="";
+  if(parsed.exceptionInfo){
+    const code = parsed.exceptionInfo.exceptionCode;
+    bugCheckHex = hex(code);
+    bugCheckName = NTSTATUS[code] ? NTSTATUS[code].split(" — ")[0] : "Exception code " + hex(code);
+    meaning = NTSTATUS[code] ? NTSTATUS[code] : "Raw exception code captured from the minidump exception stream.";
+  }
+  const modMap = findSysModules(buf);
+  const modules = [...modMap.keys()];
+  const classification = classify(modules);
+
+  return {
+    filename,
+    severity: "warn",
+    bugCheckHex, bugCheckName, meaning,
+    ntstatusNote: null,
+    params: [],
+    format: parsed.format,
+    modules, modMap, classification
+  };
+}
+
+function buildUnknownReport(filename){
+  return {
+    filename,
+    severity: "warn",
+    bugCheckHex: "n/a",
+    bugCheckName: "Unrecognized file format",
+    meaning: "This file doesn't start with a PAGEDU64/PAGEDUMP or MDMP signature, so it may not be a Windows crash dump, or the header is corrupted/truncated.",
+    ntstatusNote: null,
+    params: [],
+    format: "Unknown",
+    modules: [], modMap: new Map(), classification: null
+  };
+}
+
+function escapeHtml(s){
+  return s.replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+}
+
+function renderReport(r, idx){
+  const sevClass = r.severity;
+  const modsHtml = r.modules.length
+    ? `<div class="modlist">` + r.modules.map(m=>{
+        const isSuspect = r.classification && r.classification.driver === m;
+        return `<span class="mod ${isSuspect?'suspect':''}">${escapeHtml(m)}${r.modMap.get(m)>1 ? ' ×'+r.modMap.get(m) : ''}</span>`;
+      }).join("") + `</div>`
+    : `<div style="color:var(--dim); font-size:12.5px;">No driver (.sys) names found via string scan.</div>`;
+
+  const paramsHtml = r.params.length
+    ? `<div class="kv">
+        <div class="k">Parameter 1</div><div class="v code">${hex2(r.params[0])}</div>
+        <div class="k">Parameter 2</div><div class="v code">${hex2(r.params[1])}</div>
+        <div class="k">Parameter 3</div><div class="v code">${hex2(r.params[2])}</div>
+        <div class="k">Parameter 4</div><div class="v code">${hex2(r.params[3])}</div>
+      </div>`
+    : "";
+
+  const ntstatusHtml = r.ntstatusNote
+    ? `<div class="meaning" style="margin-top:8px;"><strong>Exception code (Param1):</strong> ${escapeHtml(r.ntstatusNote)}</div>`
+    : "";
+
+  const classHtml = r.classification
+    ? `<div class="meaning" style="margin-top:8px; border-color: rgba(226,96,79,.35);">
+        <strong style="color:var(--bad);">Likely culprit:</strong> ${escapeHtml(r.classification.driver)} — ${escapeHtml(r.classification.note)}
+      </div>`
+    : "";
+
+  return `
+  <div class="card" id="card-${idx}">
+    <div class="card-head" onclick="document.getElementById('card-${idx}').classList.toggle('open')">
+      <div class="card-head-left">
+        <span class="sev-dot ${sevClass}"></span>
+        <span class="fname">${escapeHtml(r.filename)}</span>
+        <span class="bugcheck-name">— ${escapeHtml(r.bugCheckName)}</span>
+      </div>
+      <span class="chev">▶</span>
+    </div>
+    <div class="card-body">
+      <div class="kv">
+        <div class="k">Format</div><div class="v">${escapeHtml(r.format)}</div>
+        <div class="k">Bug check code</div><div class="v code">${escapeHtml(r.bugCheckHex)}</div>
+        <div class="k">Bug check name</div><div class="v">${escapeHtml(r.bugCheckName)}</div>
+      </div>
+      <div class="meaning">${escapeHtml(r.meaning)}</div>
+      ${ntstatusHtml}
+      ${paramsHtml ? `<div class="section-label">Bug check parameters</div>${paramsHtml}` : ""}
+      <div class="section-label">Driver / module names found in file</div>
+      ${modsHtml}
+      ${classHtml}
+    </div>
+  </div>`;
+}
+
+function hex2(n){
+  if(typeof n === "bigint") return "0x"+n.toString(16);
+  return hex(n);
+}
+
+function renderSummary(reports){
+  const allModules = reports.flatMap(r=>r.modules);
+  const counts = {};
+  allModules.forEach(m=>counts[m]=(counts[m]||0)+1);
+  const repeatOffenders = Object.entries(counts).filter(([m,c])=>c>1).sort((a,b)=>b[1]-a[1]);
+
+  if(repeatOffenders.length === 0) return "";
+
+  const top = repeatOffenders[0];
+  const cls = classify([top[0]]);
+  return `<div class="summary-banner">
+    <strong>${escapeHtml(top[0])}</strong> appears in ${top[1]} of ${reports.length} dump${reports.length>1?'s':''} analyzed.
+    ${cls ? escapeHtml(cls.note) : "Appearing across multiple crashes with different bug check codes usually means this component (or the hardware behind it) is the common point of failure, even when the specific error type varies."}
+  </div>`;
+}
+
+let fileCounter = 0;
+
+async function handleFiles(fileList){
+  const files = [...fileList].filter(f=>f.name.toLowerCase().endsWith(".dmp"));
+  if(files.length === 0) return;
+
+  const reportsEl = document.getElementById("reports");
+  const newReports = [];
+
+  for(const file of files){
+    const buf = await file.arrayBuffer();
+    let report;
+    try{
+      const kernel = parseKernelDump(buf);
+      if(kernel){
+        report = buildKernelReport(file.name, buf, kernel);
+      } else {
+        const mini = parseMinidump(buf);
+        if(mini){
+          report = buildMinidumpReport(file.name, buf, mini);
+        } else {
+          report = buildUnknownReport(file.name);
+        }
+      }
+    } catch(e){
+      report = buildUnknownReport(file.name);
+      report.meaning = "Error while parsing: " + e.message;
+    }
+    newReports.push(report);
+  }
+
+  // prepend new reports (most recent batch on top), keep existing
+  const existingHtml = reportsEl.innerHTML;
+  const summaryHtml = renderSummary(newReports);
+  reportsEl.innerHTML = summaryHtml + newReports.map(r=>renderReport(r, fileCounter++)).join("") + existingHtml.replace(/<div class="summary-banner">[\s\S]*?<\/div>/,"");
+
+  // auto-open first card
+  const first = reportsEl.querySelector(".card");
+  if(first) first.classList.add("open");
+}
+
+const drop = document.getElementById("drop");
+const fileInput = document.getElementById("fileInput");
+
+drop.addEventListener("click", ()=>fileInput.click());
+fileInput.addEventListener("change", e=>handleFiles(e.target.files));
+
+["dragenter","dragover"].forEach(evt=>{
+  drop.addEventListener(evt, e=>{ e.preventDefault(); drop.classList.add("drag"); });
+});
+["dragleave","drop"].forEach(evt=>{
+  drop.addEventListener(evt, e=>{ e.preventDefault(); drop.classList.remove("drag"); });
+});
+drop.addEventListener("drop", e=>{
+  if(e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
+});
+</script>
+</body>
+</html>
